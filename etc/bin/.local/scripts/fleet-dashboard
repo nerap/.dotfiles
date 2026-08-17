@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# fleet-dashboard [bare-repo-path] — live 4×2 status grid for worktrees 1-8 of a
-# bare-repo workspace. Bound to C-u. With no argument it detects the workspace
-# from the current tmux pane's path (falling back to prsnl_app), so it works for
-# any repo set up by clone-workspace. Layout mirrors the workspace nav keys:
-#     top row  →  WT1  WT2  WT3  WT4   (H J K L)
-#     bottom   →  WT5  WT6  WT7  WT8   (N M , .)
-# Each pane runs `fleet-card <bare> <n>` and self-refreshes; re-running just
-# switches back to the (per-repo) dashboard session.
-
+# fleet-dashboard [bare-repo-path] — live 4×2 status grid for worktrees 1-8.
+# Bound to C-u. Detects the workspace from the current pane (falls back to
+# prsnl_app). Layout mirrors the nav keys: top row WT1-4 (H J K L), bottom WT5-8.
+#
+# ARCHITECTURE (stable): a SINGLE `fleet-collector` process does all the
+# tmux/git/docker work and renders all 8 cards into ~/.claude/fleet/render/. The
+# 8 pane processes are `fleet-view`, which ONLY read those files — zero tmux
+# calls — so no matter how loaded the box is, panes never freeze or garble.
+# C-u (re-running this) just re-attaches, restarting the collector/views only if
+# they died. No per-pane races, nothing to "smart-refresh".
 set -uo pipefail
 SD="$HOME/bin/.local/scripts"
-card="$SD/fleet-card"
+view="$SD/fleet-view"
+collector="$SD/fleet-collector"
 
-# Walk up from a path to the bare repo that owns it (same rule as switch-workspace).
+REBUILD=0
+case "${1:-}" in -r|--rebuild) REBUILD=1; shift ;; esac
+
 find_bare_repo() {
   local dir="$1" parent
   while [ "$dir" != "/" ] && [ -n "$dir" ]; do
@@ -30,38 +34,48 @@ if [ -z "$bare" ] && [ -n "${TMUX:-}" ]; then
   bare=$(find_bare_repo "$cur" 2>/dev/null || true)
 fi
 [ -z "$bare" ] && bare="$HOME/work/prsnl_app.git"
-if [ ! -d "$bare" ]; then
-  [ -n "${TMUX:-}" ] && tmux display-message "fleet: no worktree workspace here"
-  exit 0
-fi
+[ -d "$bare" ] || { [ -n "${TMUX:-}" ] && tmux display-message "fleet: no worktree workspace here"; exit 0; }
 
 repo=$(basename "$bare" .git | tr . _)
 SESSION="fleet_${repo}"
+CPIDF="$HOME/.claude/fleet/collector.${repo}.pid"
+mkdir -p "$HOME/.claude/fleet/render"
+
+# ── the one collector, supervised. Start it if not already running.
+start_collector() {
+  # already supervised? nothing to do.
+  if [ -f "$CPIDF" ] && kill -0 "$(cat "$CPIDF" 2>/dev/null)" 2>/dev/null; then return; fi
+  # stale pidfile but a collector for THIS repo is somehow running -> reap it so we
+  # never end up with two (which would double the tmux load and flicker files).
+  pkill -f "fleet-collector $bare" 2>/dev/null
+  sleep 1
+  # tiny supervisor loop so a collector crash self-restarts
+  ( while :; do "$collector" "$bare" >/dev/null 2>&1; sleep 1; done ) >/dev/null 2>&1 &
+  echo $! > "$CPIDF"
+}
+
+[ "$REBUILD" = 1 ] && { tmux kill-session -t "$SESSION" 2>/dev/null; [ -f "$CPIDF" ] && kill "$(cat "$CPIDF")" 2>/dev/null; rm -f "$CPIDF"; }
 
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-  # Each card's pane is rooted in its worktree so the global workspace-nav keys
-  # (C-h/j/k/l/n/m/,/.) resolve the bare repo and jump straight to that worktree.
-  a=$(tmux new-session -ds "$SESSION" -n dash -c "$bare/1" -P -F '#{pane_id}' "$card $bare 1")
+  # each pane rooted in its worktree so the nav keys (C-h/j/k/l/n/m/,/.) resolve
+  # the bare repo and jump straight there.
+  a=$(tmux new-session -ds "$SESSION" -n dash -c "$bare/1" -P -F '#{pane_id}' "$view $bare 1")
   tmux set-option -t "$SESSION" status off
-  tmux set-option -t "$SESSION" mouse off          # read-only: no click-select, no drag-resize
+  tmux set-option -t "$SESSION" mouse off
   tmux set-option -t "$SESSION" pane-border-status top
   tmux set-option -t "$SESSION" pane-border-format ' #{pane_index} '
 
-  # bottom-row anchor (WT5) — split the whole window into two rows
-  e=$(tmux split-window -v -l 50% -t "$a" -c "$bare/5" -P -F '#{pane_id}' "$card $bare 5")
-
-  # top row → 1 | 2 | 3 | 4
-  c=$(tmux split-window -h -l 50% -t "$a" -c "$bare/3" -P -F '#{pane_id}' "$card $bare 3")
-  tmux split-window -h -l 50% -t "$a" -c "$bare/2" -P -F '#{pane_id}' "$card $bare 2" >/dev/null
-  tmux split-window -h -l 50% -t "$c" -c "$bare/4" -P -F '#{pane_id}' "$card $bare 4" >/dev/null
-
-  # bottom row → 5 | 6 | 7 | 8
-  g=$(tmux split-window -h -l 50% -t "$e" -c "$bare/7" -P -F '#{pane_id}' "$card $bare 7")
-  tmux split-window -h -l 50% -t "$e" -c "$bare/6" -P -F '#{pane_id}' "$card $bare 6" >/dev/null
-  tmux split-window -h -l 50% -t "$g" -c "$bare/8" -P -F '#{pane_id}' "$card $bare 8" >/dev/null
-
+  e=$(tmux split-window -v -l 50% -t "$a" -c "$bare/5" -P -F '#{pane_id}' "$view $bare 5")
+  c=$(tmux split-window -h -l 50% -t "$a" -c "$bare/3" -P -F '#{pane_id}' "$view $bare 3")
+  tmux split-window -h -l 50% -t "$a" -c "$bare/2" -P -F '#{pane_id}' "$view $bare 2" >/dev/null
+  tmux split-window -h -l 50% -t "$c" -c "$bare/4" -P -F '#{pane_id}' "$view $bare 4" >/dev/null
+  g=$(tmux split-window -h -l 50% -t "$e" -c "$bare/7" -P -F '#{pane_id}' "$view $bare 7")
+  tmux split-window -h -l 50% -t "$e" -c "$bare/6" -P -F '#{pane_id}' "$view $bare 6" >/dev/null
+  tmux split-window -h -l 50% -t "$g" -c "$bare/8" -P -F '#{pane_id}' "$view $bare 8" >/dev/null
   tmux select-pane -t "$a"
 fi
+
+start_collector   # ensure the single data process is running
 
 if [ -n "${TMUX:-}" ]; then
   tmux switch-client -t "$SESSION"

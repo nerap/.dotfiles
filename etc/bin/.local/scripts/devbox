@@ -51,7 +51,7 @@ need_id() {
   echo "$id"
 }
 
-# Generate the SSH tunnels. Each worktree n exposes: vite 8080+n, and the supabase
+# Generate the SSH tunnels. Each worktree n exposes: vite 8080+n, admin-web 8480+n, and the supabase
 # stack at 54321+(n-1)*100 .. +6. Forwarding them means localhost:8081 in your local
 # browser still hits worktree 1 — exactly like it does today.
 write_ssh_conf() {
@@ -69,7 +69,8 @@ write_ssh_conf() {
     echo "  ControlPersist 10m"
     echo "  StrictHostKeyChecking accept-new"
     for n in 1 2 3 4 5 6 7 8; do
-      echo "  LocalForward $((8080 + n)) 127.0.0.1:$((8080 + n))   # wt$n vite"
+      echo "  LocalForward $((8080 + n)) 127.0.0.1:$((8080 + n))   # wt$n vite (front)"
+      echo "  LocalForward $((8480 + n)) 127.0.0.1:$((8480 + n))   # wt$n admin-web"
       local base=$((54321 + (n - 1) * 100))
       for o in 0 1 2 3 4 5 6; do
         echo "  LocalForward $((base + o)) 127.0.0.1:$((base + o))"
@@ -93,7 +94,7 @@ cmd_forwards() {
   local id ip; id=$(need_id); ip=$(pub_ip "$id")
   [ -n "$ip" ] && [ "$ip" != "None" ] || die "instance has no public IP (is it running?)"
   write_ssh_conf "$ip"
-  say "ssh config -> $SSH_CONF (host: $NAME, ip: $ip, 64 tunnels)"
+  say "ssh config -> $SSH_CONF (host: $NAME, ip: $ip, 72 tunnels)"
 }
 
 cmd_up() {

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# fleet-card-sup <bare-repo-path> <n> — supervisor for a fleet-card.
+#
+# The dashboard runs THIS instead of fleet-card directly. If the card exits or
+# crashes for ANY reason (unexpected error, killed subcommand, transient bug),
+# the supervisor restarts it after a short pause — so a dashboard pane self-heals
+# within ~1s without needing C-u. Freezes (card blocked on a write to a dead
+# pane) are handled separately by the heartbeat smart-refresh in fleet-dashboard.
+#
+# Kept intentionally tiny and dependency-free so the supervisor itself never dies.
+bare="${1:?usage: fleet-card-sup <bare-repo-path> <n>}"
+n="${2:?usage: fleet-card-sup <bare-repo-path> <n>}"
+card="$HOME/bin/.local/scripts/fleet-card"
+
+while :; do
+  "$card" "$bare" "$n" 2>/dev/null
+  # card exited (crash or clean) — pause briefly then relaunch. The pause avoids a
+  # hot loop if the card dies instantly (e.g. bad args), and is invisible in use.
+  sleep 1
+done

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# fleet-collector <bare-repo-path> — THE single data-gathering process for the
+# dashboard. Renders all 8 worktree cards ONE AT A TIME into files under
+# ~/.claude/fleet/render/, then sleeps. The display panes (fleet-view) only read
+# those files and make ZERO tmux calls — so no matter how loaded the box is, the
+# panes can never freeze, garble, or show "NO SESSION". All the tmux/git/docker
+# contention is confined to this one serial process instead of 8 racing loops.
+#
+# Supervised by fleet-dashboard; if it dies it is restarted.
+set -uo pipefail
+bare="${1:?usage: fleet-collector <bare-repo-path>}"
+repo=$(basename "$bare" .git | tr . _)
+card="$HOME/bin/.local/scripts/fleet-card"
+rdir="$HOME/.claude/fleet/render"
+mkdir -p "$rdir"
+
+# Single-instance guard: only ONE collector per repo may run, no matter how many
+# supervisors try to spawn it. Take an exclusive, non-blocking lock; a duplicate
+# exits immediately. This makes the supervised-restart safe (no dupes ever).
+exec 9>"$HOME/.claude/fleet/collector.${repo}.lock"
+flock -n 9 || exit 0
+
+# Pane geometry for the grid is uniform; read it once from the live dashboard so
+# each card renders at the right size (re-read each cycle so it tracks resizes).
+session="fleet_${repo}"
+
+while :; do
+  # Render at the MINIMUM pane size so every frame fits every pane. Panes in the
+  # grid can differ by ~1 col; sizing to the widest made lines wrap in narrower
+  # panes, pushing the header off-screen. Min width/height fits all.
+  pw=$(tmux list-panes -t "$session" -F '#{pane_width}'  2>/dev/null | sort -n | head -1)
+  ph=$(tmux list-panes -t "$session" -F '#{pane_height}' 2>/dev/null | sort -n | head -1)
+  [ -z "${pw:-}" ] && pw=76; [ -z "${ph:-}" ] && ph=27
+
+  for n in 1 2 3 4 5 6 7 8; do
+    out="$rdir/${repo}_${n}"
+    FLEET_ONCE=1 FLEET_COLS="$pw" FLEET_ROWS="$ph" "$card" "$bare" "$n" > "$out.tmp" 2>/dev/null \
+      && mv "$out.tmp" "$out" 2>/dev/null
+  done
+
+  # collector heartbeat (fleet-dashboard's smart-refresh watches this ONE file)
+  date +%s > "$HOME/.claude/fleet/collector.hb" 2>/dev/null
+  sleep 2
+done

@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
+
+# --- resilience: bound external calls with a timeout, so a hung tmux server
+# (e.g. blocked writing to a not-yet-reaped dead SSH client after an abrupt
+# network drop) can't freeze this refresh loop forever. A timed-out call just
+# fails that cycle; the loop recovers on the next tick. Fixes the 'C-u dashboard
+# stops updating after connection loss' wedge.
+tmux() { command timeout 5 tmux "$@"; }
+git()  { command timeout 8 git  "$@"; }
 # fleet-card <bare-repo-path> <n> — live status card for worktree <n> of a
 # bare-repo workspace. Used as the per-pane process inside fleet-dashboard.
 #
 # Shows, for worktree <n> (session <repo>_<n>):
+#   - a one-line PR badge on TOP: #<num> <state> ✓pass ✗fail ●pending, rolled up
+#     from `gh pr view` on the worktree's branch (refreshed in the background on a
+#     TTL so the grid never blocks on the network)
 #   - the nav key that jumps to it (H J K L / N M , .)
 #   - the checked-out branch
 #   - the Claude status: WORKING / WAITING FOR INPUT / IDLE / NO CLAUDE
+#   - a blue "docker up" box, shown only while this worktree's dev stack is up,
+#     listing its front & admin dev URLs as clickable OSC-8 links (needs tmux ≥3.4
+#     and a hyperlink-capable terminal; degrades to plain text otherwise)
 #   - a proportional minimap of window 1's pane layout, filling the card, with
 #     each cell coloured by what it holds:
 #       W = Claude working   ! = Claude waiting for input   C = Claude idle
@@ -25,10 +39,32 @@ fleetdir="$HOME/.claude/fleet"
 keys=(_ H J K L N M , .)
 key="${keys[$n]}"
 
+# Front/admin dev URLs for this worktree. Ports are fixed by slot (front 8080+n,
+# admin 8480+n = VITE_PORT+400) and match the SSH tunnels `devbox forwards` opens,
+# so http://localhost:<port> reaches this worktree straight from the local browser.
+fport=$((8080 + n)); aport=$((8480 + n))
+front_url="http://localhost:$fport"; admin_url="http://localhost:$aport"
+
+mkdir -p "$fleetdir" 2>/dev/null
+prfile="$fleetdir/$session.pr"; prlock="$fleetdir/$session.pr.lock"
+PR_TTL=120         # refresh the cached PR status once it is this many seconds old
+PR_LOCK_STALE=90   # reclaim a refresh lock older than this (a hung/killed gh)
+
+# owner/name slug for `gh --repo`; stable for the worktree's life, so resolve once.
+slug=""
+[ -d "$wt" ] && slug=$(git -C "$wt" remote get-url origin 2>/dev/null \
+  | sed -E 's#.*github\.com[:/]##; s#\.git$##')
+
+# OSC-8 terminal hyperlink: clickable in tmux ≥3.4 + a capable terminal (iTerm2,
+# WezTerm, …); degrades to the plain visible label everywhere else.
+hyperlink() {  # $1=url $2=label
+  printf '%s]8;;%s%s\\%s%s]8;;%s\\' "$esc" "$1" "$esc" "$2" "$esc" "$esc"
+}
+
 esc=$'\033'
 reset="${esc}[0m"; bold="${esc}[1m"; dim="${esc}[2m"
 red="${esc}[31m"; grn="${esc}[32m"; yel="${esc}[33m"; cyn="${esc}[36m"
-gry="${esc}[90m"; blu="${esc}[34m"
+gry="${esc}[90m"; blu="${esc}[34m"; bblu="${esc}[94m"; mag="${esc}[35m"
 bgr="${esc}[30;42m"; byl="${esc}[30;43m"; brd="${esc}[37;41m"; bgy="${esc}[30;100m"
 # bright foregrounds for the status squares
 sq_w="${esc}[93m"; sq_wait="${esc}[91m"; sq_i="${esc}[92m"; sq_v="${esc}[94m"
@@ -40,6 +76,7 @@ trap 'printf "%s" "${esc}[?25h"' EXIT
 # "esc to interrupt". None of these appear when idle.
 WORK_MARK='esc to interrupt|Running…|\([0-9]+m? ?[0-9]*s ·|[↑↓] [0-9.,]+k? tokens'
 WAIT_MARK='Do you want to|Would you like to proceed|❯ +1\.| 1\. Yes'
+AUTH_MARK='Login expired|Please run /login|Invalid API key|OAuth token'
 
 # colour one minimap row: Claude panes are a square tinted by live status,
 # nvim/shell get their own tint, borders are dimmed so the squares stand out.
@@ -61,7 +98,23 @@ print_grid_row() {
 }
 
 # proportional minimap of one window, sized Cw x Ch. args: session win Cw Ch "pstates"
+_DRAW_CACHE_SIG=""; _DRAW_CACHE_OUT=""
 draw_map() {
+  local sess="$1" win="$2" Cw="$3" Ch="$4" pstates="$5"
+  # cheap signature: geometry of the window's panes + sizes + statuses. Only when
+  # this changes do we pay for the (expensive) grid render below.
+  local geo sig
+  geo=$(tmux list-panes -t "$sess:$win" -F '#{pane_id}:#{pane_left},#{pane_top},#{pane_width},#{pane_height}' 2>/dev/null | tr '\n' ';')
+  sig="${Cw}x${Ch}|${geo}|${pstates}"
+  if [ "$sig" = "$_DRAW_CACHE_SIG" ]; then
+    printf '%s' "$_DRAW_CACHE_OUT"; return
+  fi
+  _DRAW_CACHE_OUT=$(_draw_map_raw "$sess" "$win" "$Cw" "$Ch" "$pstates")
+  _DRAW_CACHE_SIG="$sig"
+  printf '%s' "$_DRAW_CACHE_OUT"
+}
+
+_draw_map_raw() {
   local sess="$1" win="$2" Cw="$3" Ch="$4" pstates="$5"
   local ww wh
   read -r ww wh < <(tmux display-message -pt "$sess:$win" '#{window_width} #{window_height}' 2>/dev/null)
@@ -106,8 +159,26 @@ draw_map() {
 }
 
 while true; do
-  cols=$(tmux display-message -pt "${TMUX_PANE:-}" '#{pane_width}' 2>/dev/null); [ -z "$cols" ] && cols=40
-  rows=$(tmux display-message -pt "${TMUX_PANE:-}" '#{pane_height}' 2>/dev/null); [ -z "$rows" ] && rows=20
+  printf '%s' "$(date +%s)" > "$fleetdir/$session.hb" 2>/dev/null   # liveness heartbeat for C-u smart-refresh
+  # Size from the pane's own pty (ground truth for what renders HERE). tmux's
+  # `display-message #{pane_width}` can report another client's width when the
+  # session has clients of differing sizes, which made every line overrun the
+  # pane and wrap into a garbled frame. stty reads the live winsize; fall back
+  # to the tmux query, then to a small default.
+  cols="${FLEET_COLS:-}"; rows="${FLEET_ROWS:-}"
+  [ -z "$cols" ] && read -r rows cols < <(stty size </dev/tty 2>/dev/null)
+  [ -z "$cols" ] && { cols=$(tmux display-message -pt "${TMUX_PANE:-}" '#{pane_width}' 2>/dev/null); rows=$(tmux display-message -pt "${TMUX_PANE:-}" '#{pane_height}' 2>/dev/null); }
+  [ -z "$cols" ] && cols=40
+  [ -z "$rows" ] && rows=20
+
+  # A pane is born full-width and only tiled narrow afterwards; the first frame is
+  # therefore drawn wide and, once the pane shrinks, its wrapped remains linger
+  # (we redraw in place, and an idle card's buffer may never change again). So on
+  # any size change wipe the screen and force a full repaint from a clean slate.
+  if [ "${cols}x${rows}" != "${prevsize:-}" ]; then
+    printf '%s' "${esc}[2J${esc}[H"
+    prev=""; prevsize="${cols}x${rows}"
+  fi
 
   # branch
   if [ -d "$wt" ]; then
@@ -117,16 +188,98 @@ while true; do
     branch="(no worktree)"
   fi
 
+  # Docker status — the up/down box. `docker ps` against 55+ containers takes
+  # ~1-2s and used to run once PER CARD PER LOOP (8x concurrent), pinning the
+  # daemon and stretching every loop to ~12s (the grid looked frozen). Now ONE
+  # background refresh writes a shared cache of all up compose-projects on a TTL;
+  # every card just greps that file. Near-zero per-loop cost.
+  docker_on=0; proj_rt=""
+  rt="$wt/.dev/runtime.env"
+  [ -f "$rt" ] && proj_rt=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$rt" | head -1)
+  dkfile="$fleetdir/docker.projects"; dklock="$fleetdir/docker.lock"; DK_TTL=15
+  dk_ts=0; [ -f "$dkfile" ] && dk_ts=$(sed -n 1p "$dkfile" 2>/dev/null || echo 0)
+  if [ $(( $(date +%s) - ${dk_ts:-0} )) -ge "$DK_TTL" ]; then
+    # single refresher across all cards, guarded by a short-lived lock
+    dl_ok=1
+    if [ -f "$dklock" ]; then
+      dlts=$(cat "$dklock" 2>/dev/null || echo 0)
+      [ $(( $(date +%s) - ${dlts:-0} )) -lt 20 ] && dl_ok=0
+    fi
+    if [ "$dl_ok" = 1 ]; then
+      date +%s > "$dklock"
+      ( { date +%s; timeout 8 docker ps --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | sort -u; } > "$dkfile.tmp" 2>/dev/null \
+          && mv "$dkfile.tmp" "$dkfile" 2>/dev/null; rm -f "$dklock" 2>/dev/null ) >/dev/null 2>&1 &
+    fi
+  fi
+  if [ -f "$dkfile" ]; then
+    while IFS= read -r p; do
+      [ -z "$p" ] && continue
+      { [ -n "$proj_rt" ] && [ "$p" = "$proj_rt" ]; } && { docker_on=1; break; }
+      case "$p" in *"wt$n") docker_on=1; break ;; esac
+    done < <(tail -n +2 "$dkfile" 2>/dev/null)
+  fi
+
+  # PR status — refreshed by a background gh on a TTL so the grid never blocks.
+  # Cache line: <epoch>\t<number>\t<state>\t<pass>\t<fail>\t<pending>  (or \tNONE).
+  now=$(date +%s); pr_ts=0; pr_payload=""; pr_branch=""
+  [ -f "$prfile" ] && IFS=$'\t' read -r pr_ts pr_branch pr_payload < "$prfile" 2>/dev/null
+  # invalidate a cache from a different branch (e.g. after a checkout) so a stale
+  # PR from the previous branch never shows next to the new branch name
+  [ "$pr_branch" != "$branch" ] && { pr_ts=0; pr_payload=""; }
+  if [ -n "$slug" ] && [ -n "$branch" ] && [ "$branch" != "(no worktree)" ]; then
+    lock_ok=1
+    if [ -f "$prlock" ]; then
+      lts=$(cat "$prlock" 2>/dev/null || echo 0)
+      [ $(( now - ${lts:-0} )) -lt "$PR_LOCK_STALE" ] && lock_ok=0
+    fi
+    if [ $(( now - ${pr_ts:-0} )) -ge "$PR_TTL" ] && [ "$lock_ok" = 1 ]; then
+      echo "$now" > "$prlock"
+      ( out=$(gh pr view "$branch" --repo "$slug" \
+                --json number,state,isDraft,statusCheckRollup \
+                --jq '[.number,(if .isDraft then "draft" else (.state|ascii_downcase) end),([.statusCheckRollup[]?|select(.conclusion=="SUCCESS" or .state=="SUCCESS")]|length),([.statusCheckRollup[]?|select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .state=="FAILURE" or .state=="ERROR")]|length),([.statusCheckRollup[]?|select(.status=="IN_PROGRESS" or .status=="QUEUED" or .state=="PENDING")]|length)] | @tsv' 2>/dev/null)
+        [ -z "$out" ] && out="NONE"
+        printf '%s\t%s\t%s\n' "$(date +%s)" "$branch" "$out" > "$prfile.tmp" 2>/dev/null \
+          && mv "$prfile.tmp" "$prfile" 2>/dev/null
+        rm -f "$prlock" 2>/dev/null
+      ) >/dev/null 2>&1 &
+    fi
+  fi
+
+  # render the one-line PR badge (top of the card) from the cached payload
+  if [ -z "$slug" ] || [ "$branch" = "(no worktree)" ]; then
+    pr_line="${dim}— no repo${reset}"
+  elif [ -z "$pr_payload" ]; then
+    pr_line="${dim}PR …${reset}"
+  elif [ "$pr_payload" = "NONE" ]; then
+    pr_line="${dim}no PR${reset}"
+  else
+    IFS=$'\t' read -r pn pst ppass pfail ppend <<< "$pr_payload"
+    case "$pst" in
+      draft)  sg="${gry}✎ draft${reset}" ;;
+      open)   sg="${grn}● open${reset}" ;;
+      merged) sg="${mag}✔ merged${reset}" ;;
+      closed) sg="${red}✖ closed${reset}" ;;
+      *)      sg="${dim}${pst}${reset}" ;;
+    esac
+    if [ "${pfail:-0}" -gt 0 ]; then xp="${red}${bold}✗${pfail}${reset}"; else xp="${dim}✗0${reset}"; fi
+    if [ "${ppend:-0}" -gt 0 ]; then pp="${yel}●${ppend}${reset}"; else pp="${dim}●0${reset}"; fi
+    pr_line="${cyn}#${pn}${reset} ${sg}  ${grn}✓${ppass:-0}${reset} ${xp} ${pp}"
+  fi
+
   # scan every pane once → pstates (pid=CHAR) + aggregate flags for the badge
-  pstates=""; has_wait=0; has_work=0; has_claude=0; sess_ok=0
-  if tmux has-session -t "$session" 2>/dev/null; then
+  pstates=""; has_wait=0; has_work=0; has_claude=0; has_auth=0; sess_ok=0
+  # has-session retry: under heavy load a single tmux call can time out; a session
+  # that exists never vanishes, so retry once before declaring "NO SESSION" (which
+  # would otherwise wrongly wipe the card on a transient hiccup).
+  if tmux has-session -t "$session" 2>/dev/null || tmux has-session -t "$session" 2>/dev/null; then
     sess_ok=1
     while read -r pid pcmd; do
       case "$pcmd" in
         [0-9]*.[0-9]*|claude)
           has_claude=1
           cap=$(tmux capture-pane -pt "$pid" 2>/dev/null)   # visible screen only (no stale scrollback)
-          if   printf '%s' "$cap" | grep -qiE "$WORK_MARK"; then pstates="$pstates $pid=W"; has_work=1
+          if   printf '%s' "$cap" | grep -qiE "$AUTH_MARK"; then pstates="$pstates $pid=A"; has_auth=1
+          elif printf '%s' "$cap" | grep -qiE "$WORK_MARK"; then pstates="$pstates $pid=W"; has_work=1
           elif printf '%s' "$cap" | grep -qE  "$WAIT_MARK"; then pstates="$pstates $pid=!"; has_wait=1
           else pstates="$pstates $pid=C"; fi
           ;;
@@ -138,6 +291,7 @@ while true; do
 
   if   [ "$sess_ok" = 0 ];    then state=nosession
   elif [ "$has_claude" = 0 ]; then state=offline
+  elif [ "$has_auth" = 1 ];   then state=authexpired
   elif [ "$has_wait" = 1 ];   then state=waiting
   elif [ "$has_work" = 1 ];   then state=working
   else state=idle
@@ -153,19 +307,39 @@ while true; do
     fi
   fi
 
-  ccount=$(printf '%s' "$pstates" | grep -oE '=[WC!]' | wc -l | tr -d ' ')
+  ccount=$(printf '%s' "$pstates" | grep -oE '=[WC!A]' | wc -l | tr -d ' ')
   cnote=""; [ "$ccount" -gt 1 ] && cnote=" ${bold}${ccount}×claude${reset}"
 
   case "$state" in
     working)   badge="${byl}${bold} ⚙ WORKING ${reset}";           sc="$yel" ;;
     waiting)   badge="${brd}${bold} ⌨ WAITING FOR INPUT ${reset}"; sc="$red" ;;
     idle)      badge="${bgr}${bold} ✓ IDLE ${reset}";              sc="$grn" ;;
+    authexpired) badge="${brd}${bold} ⚠ AUTH EXPIRED ${reset}";    sc="$red" ;;
     offline)   badge="${bgy}${bold} ○ NO CLAUDE ${reset}";         sc="$gry" ;;
     nosession) badge="${bgy}${bold} ○ NO SESSION ${reset}";        sc="$gry" ;;
   esac
 
   maxb=$((cols - 4)); [ "$maxb" -lt 8 ] && maxb=8
   b="$branch"; [ "${#b}" -gt "$maxb" ] && b="${b:0:maxb-1}…"
+
+  # Blue "docker up" container: a bordered box listing the front & admin URLs as
+  # clickable links. Built only when this worktree's stack is up. The visible
+  # label is host:port (predictable width); the hyperlink target is the full URL.
+  box_lines=(); box_rows=0
+  if [ "$docker_on" = 1 ]; then
+    inner=$((cols - 2)); [ "$inner" -lt 22 ] && inner=22
+    hdr=" docker up "
+    dn=$(( inner - ${#hdr} )); [ "$dn" -lt 0 ] && dn=0
+    box_lines+=("${bblu}┌${hdr}$(printf '─%.0s' $(seq 1 $dn))┐${reset}")
+    for row in "front|$front_url|localhost:$fport" "admin|$admin_url|localhost:$aport"; do
+      IFS='|' read -r lbl url vis <<< "$row"
+      vislen=$(( 1 + ${#lbl} + 3 + ${#vis} + 1 ))     # " lbl → vis " visible width
+      pn2=$(( inner - vislen )); [ "$pn2" -lt 0 ] && pn2=0
+      box_lines+=("${bblu}│${reset} ${grn}${lbl}${reset} → ${cyn}$(hyperlink "$url" "$vis")${reset} $(printf '%*s' "$pn2" '')${bblu}│${reset}")
+    done
+    box_lines+=("${bblu}└$(printf '─%.0s' $(seq 1 $inner))┘${reset}")
+    box_rows=${#box_lines[@]}
+  fi
 
   # Build the whole frame into one buffer, then redraw IN PLACE (cursor home +
   # per-line erase, no full clear) and only when it changed — so a steady
@@ -175,17 +349,20 @@ while true; do
   printf -v l2 '%s⎇ %s%s%s' "$cyn" "$bold" "$b" "$reset"
   # ${esc}[0m${esc}(B resets attributes + the ASCII charset each frame so a stray
   # SO/SI or line-drawing byte can't wedge the pane (we redraw in place, no clear).
-  buf="${esc}[?25l${esc}[0m${esc}(B${esc}[H${l1}${esc}[K${nl}${l2}${esc}[K${nl}${badge}${esc}[K${nl}"
+  buf="${esc}[?25l${esc}[0m${esc}(B${esc}[H${pr_line}${esc}[K${nl}${l1}${esc}[K${nl}${l2}${esc}[K${nl}${badge}${esc}[K${nl}"
+  for bl in "${box_lines[@]}"; do buf+="${bl}${esc}[K${nl}"; done
 
   if [ "$sess_ok" = 1 ]; then
     Cw=$((cols - 2)); [ "$Cw" -lt 6 ] && Cw=6
-    Ch=$((rows - 6)); [ "$Ch" -lt 3 ] && Ch=3          # fill the rest of the card (no scroll)
+    # header rows now: PR(1) + l1 + l2 + badge(3) + docker box + minimap borders(2) + slack(1)
+    Ch=$((rows - 7 - box_rows)); [ "$Ch" -lt 3 ] && Ch=3
     mapout=$(draw_map "$session" 1 "$Cw" "$Ch" "$pstates")
     while IFS= read -r ml; do buf+="${ml}${esc}[K${nl}"; done <<< "$mapout"
   fi
   buf+="${esc}[J"
 
+  if [ "${FLEET_ONCE:-0}" = 1 ]; then printf '%s' "$buf"; exit 0; fi
   if [ "$buf" != "${prev:-}" ]; then printf '%s' "$buf"; prev="$buf"; fi
 
-  sleep 2
+  sleep 3
 done

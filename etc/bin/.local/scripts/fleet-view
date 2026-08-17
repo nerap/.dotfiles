@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# fleet-view <bare-repo-path> <n> — the display process for one dashboard pane.
+# It ONLY reads the render file the collector writes and paints it. It makes NO
+# tmux/git/docker calls at all, so it is immune to box load — it can never freeze
+# or garble. If the render file is briefly stale, the pane just shows the last
+# good frame (graceful), never a broken one.
+set -uo pipefail
+bare="${1:?usage: fleet-view <bare-repo-path> <n>}"
+n="${2:?usage: fleet-view <bare-repo-path> <n>}"
+repo=$(basename "$bare" .git | tr . _)
+f="$HOME/.claude/fleet/render/${repo}_${n}"
+esc=$'\033'
+
+trap 'printf "%s" "${esc}[?25h"' EXIT
+printf '%s' "${esc}[?25l${esc}[2J"   # hide cursor, clear once
+
+prev=""
+while :; do
+  if [ -f "$f" ]; then
+    content=$(cat "$f" 2>/dev/null)
+    if [ "$content" != "$prev" ]; then
+      printf '%s' "$content"       # frame already carries [H home + per-line [K
+      prev="$content"
+    fi
+  else
+    printf '%s  waiting for collector…' "${esc}[H${esc}[2J"
+  fi
+  sleep 1
+done

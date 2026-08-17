@@ -8,7 +8,6 @@
       "Bash(npm:*)",
       "Bash(yarn:*)",
       "Bash(pnpm:*)",
-      "Bash(node:*)",
       "Bash(tsc:*)",
       "Bash(eslint:*)",
       "Bash(prettier:*)",
@@ -31,7 +30,6 @@
       "Bash(mkdir:*)",
       "Bash(cp:*)",
       "Bash(mv:*)",
-      "Bash(chmod:*)",
       "Bash(touch:*)",
       "Bash(tmux:*)",
       "Bash(clone-workspace:*)",
@@ -49,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "#!/bin/bash\n# Show what's about to be pushed — no blocking, safe for automation\nbranch=$(git branch --show-current 2>/dev/null || echo 'unknown')\ncount=$(git log origin/$branch..HEAD --oneline 2>/dev/null | wc -l | tr -d ' ')\nif [ \"$count\" -gt 0 ]; then\n  echo \"[Hook] Pushing $count commit(s) on $branch:\" >&2\n  git log origin/$branch..HEAD --oneline 2>/dev/null >&2\nfi"
+            "command": "#!/bin/bash\n# Show what's about to be pushed \u2014 no blocking, safe for automation\nbranch=$(git branch --show-current 2>/dev/null || echo 'unknown')\ncount=$(git log origin/$branch..HEAD --oneline 2>/dev/null | wc -l | tr -d ' ')\nif [ \"$count\" -gt 0 ]; then\n  echo \"[Hook] Pushing $count commit(s) on $branch:\" >&2\n  git log origin/$branch..HEAD --oneline 2>/dev/null >&2\nfi"
           }
         ]
       }
@@ -71,7 +69,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/nerap/.claude/scripts/notify-tmux.sh permission"
+            "command": "/home/ubuntu/.claude/scripts/notify-tmux.sh permission"
           }
         ]
       },
@@ -80,7 +78,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/nerap/.claude/scripts/notify-tmux.sh idle"
+            "command": "/home/ubuntu/.claude/scripts/notify-tmux.sh idle"
           }
         ]
       }
@@ -88,13 +86,47 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "/Users/nerap/.claude/scripts/statusline.sh"
+    "command": "/home/ubuntu/.claude/scripts/statusline.sh"
   },
   "enabledPlugins": {
     "posthog@claude-plugins-official": true
   },
-  "effortLevel": "medium",
+  "effortLevel": "high",
   "skipDangerousModePermissionPrompt": true,
   "editorMode": "vim",
-  "skipAutoPermissionPrompt": true
+  "skipAutoPermissionPrompt": true,
+  "autoMode": {
+    "soft_deny": [
+      "$defaults",
+      "Bash(supabase db reset:*) \u2014 repo-scoped destructive Supabase reset, frequently used CLI (supabase, 9\u00d7 in transcripts) but resets local/preview data",
+      "Bash(aws s3:*) in this repo when target bucket or key matches prod-files-secure.s3.us-west-2.amazonaws.com \u2014 sensitive remote target reads/writes",
+      "Bash(terraform apply:*) under infra/envs/prod/** or infra/envs/preprod/** \u2014 protected IaC scope"
+    ],
+    "environment": [
+      "### Org-wide",
+      "**Organization**: APRSNL (github.com/APRSNL) \u2014 scoped to the prsnl_app repo",
+      "**Cloud provider(s)**: AWS (S3), evidenced by prod-files-secure.s3.us-west-2.amazonaws.com contact and aws CLI usage",
+      "**Repository visibility**: private (APRSNL/prsnl_app, confirmed via gh)",
+      "**Internal sharing / snippet hosting**: None configured \u2014 treat public paste/gist services as outside the trust boundary",
+      "**Secrets management**: Doppler (prsnl/dev, prsnl-api/dev projects) for local dev secrets; CI secrets referenced by name only (e.g. DOPPLER_TOKEN, SUPABASE_ACCESS_TOKEN, GH_PAT, SLACK_BOT_TOKEN) \u2014 values not accessible",
+      "**Default / protected branches**: main, production-web, release (protected per gh); 4 rulesets also configured (names redacted) \u2014 treat as additional protection even where classic branch protection is absent",
+      "**CI/CD deploy targets**: GitHub Actions workflows targeting production (deploy-prod.yml, supabase-prod-rehearsal.yml, terraform-plan/run for prod & preprod environments)",
+      "**Network posture**: None configured",
+      "**Source control**: git via github.com:APRSNL/prsnl_app.git (origin) \u2014 this repo and its remote only",
+      "**Trusted internal domains**: automation.prsnl.fr, api.prsnl.io (contacted repeatedly in this project's transcripts)",
+      "**Trusted cloud buckets**: None configured",
+      "**Key internal services**: Supabase (local + hosted, via ./dev and supabase CLI), automation.prsnl.fr",
+      "**Internal package registry**: None configured",
+      "**Sensitive data locations & audiences**: .env / .env.local / .env.example and service-specific env files; infra/envs/prod/** and infra/envs/preprod/** Terraform state and tfvars; infra/ci-runners/**; Grafana prod dashboards (infra/grafana/dashboards/*prod*.json, infra/grafana/prod/**); docs/runbooks/prod-media-writer-key.md and p2-secrets-migration.md; .github/security/secrets.manifest.yml \u2014 share only with cleared engineering/ops audiences",
+      "**Data retention / declassification**: None configured",
+      "**Sensitive remote targets**: any host/namespace containing 'prod' or 'production' as a whole segment \u2014 e.g. prod-files-secure.s3.us-west-2.amazonaws.com, production-web branch, infra/envs/prod/**, deploy-prod.yml, supabase-prod-rehearsal.yml",
+      "**Protected deployment namespaces / environments**: prod, preprod, production-web branch, and any deploy-prod / prod-rehearsal CI workflow targets",
+      "**Protected IaC scopes**: infra/envs/prod/**, infra/envs/preprod/**, infra/ci-runners/**, infra/grafana/prod/**, and any Terraform touching IAM/RBAC/networking/quota/node-pools under these paths",
+      "### User-specific",
+      "**Primary use of Claude Code**: software development (multi-agent orchestration for PRSNL app: backlog, code-engineer, frontend, db-expert, executor, monitor, orchestrator agents)",
+      "**Trusted repo**: /data/work/prsnl_app.git/5 (this checkout) and its origin remote github.com:APRSNL/prsnl_app.git \u2014 private repo, so confidential material may be committed here but not ported from outside this session's repo",
+      "**Org-specific CLIs**: supabase, gh, doppler, bunx, aws (used within this project's workflows)",
+      "routine under this repo's .claude/, .stackwarden/, docs/, infra/ prefixes reflect established agent tooling conventions \u2014 not a blanket trust grant for prod paths"
+    ]
+  }
 }
