@@ -4,7 +4,7 @@
 # The dashboard runs THIS instead of fleet-card directly. If the card exits or
 # crashes for ANY reason (unexpected error, killed subcommand, transient bug),
 # the supervisor restarts it after a short pause — so a dashboard pane self-heals
-# within ~1s without needing C-t. Freezes (card blocked on a write to a dead
+# within ~1s without needing C-p. Freezes (card blocked on a write to a dead
 # pane) are handled separately by the heartbeat smart-refresh in fleet-dashboard.
 #
 # Kept intentionally tiny and dependency-free so the supervisor itself never dies.

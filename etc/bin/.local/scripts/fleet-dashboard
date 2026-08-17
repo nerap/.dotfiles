@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # fleet-dashboard [bare-repo-path] — live 4×2 status grid for worktrees 1-8.
-# Bound to C-t. Detects the workspace from the current pane (falls back to
+# Bound to C-p. Detects the workspace from the current pane (falls back to
 # prsnl_app). Layout mirrors the nav keys: top row WT1-4 (H J K L), bottom WT5-8.
 #
 # ARCHITECTURE (stable): a SINGLE `fleet-collector` process does all the
 # tmux/git/docker work and renders all 8 cards into ~/.claude/fleet/render/. The
 # 8 pane processes are `fleet-view`, which ONLY read those files — zero tmux
 # calls — so no matter how loaded the box is, panes never freeze or garble.
-# C-t (re-running this) just re-attaches, restarting the collector/views only if
+# C-p (re-running this) just re-attaches, restarting the collector/views only if
 # they died. No per-pane races, nothing to "smart-refresh".
 set -uo pipefail
 SD="$HOME/bin/.local/scripts"
