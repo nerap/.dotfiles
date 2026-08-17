@@ -2,7 +2,7 @@
 
 One Graviton box that runs the whole worktree fleet, so 48GB of laptop RAM stops
 being the ceiling. Everything you do today — `C-h/j/k/l/n/m/,/.` to switch worktrees,
-`C-u` for the fleet dashboard, nvim, 4 Claudes in one worktree — works **unchanged**,
+`C-t` for the fleet dashboard, nvim, 4 Claudes in one worktree — works **unchanged**,
 because it's the same tmux config on the other end of an SSH pipe.
 
 ## Why one box and not eight
