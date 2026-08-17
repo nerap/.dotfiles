@@ -38,9 +38,9 @@ variable "instance_type" {
 }
 
 variable "root_volume_gb" {
-  description = "Root volume (OS + tooling only). Work lives on the separate volume below."
+  description = "Root volume (OS + tooling only). Work lives on the separate volume below. Sized for the docker fleet — /var/lib/docker (8× supabase stacks) is the main consumer."
   type        = number
-  default     = 100
+  default     = 300
 }
 
 variable "work_volume_gb" {
