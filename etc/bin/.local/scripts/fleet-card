@@ -40,6 +40,9 @@ trap 'printf "%s" "${esc}[?25h"' EXIT
 # "esc to interrupt". None of these appear when idle.
 WORK_MARK='esc to interrupt|Running…|\([0-9]+m? ?[0-9]*s ·|[↑↓] [0-9.,]+k? tokens'
 WAIT_MARK='Do you want to|Would you like to proceed|❯ +1\.| 1\. Yes'
+# A Claude process alive but unauthenticated shows this banner. Its process still
+# runs, so without this it is mis-reported as IDLE. Highest-priority state.
+AUTH_MARK='Login expired|Please run /login|Invalid API key|OAuth token'
 
 # colour one minimap row: Claude panes are a square tinted by live status,
 # nvim/shell get their own tint, borders are dimmed so the squares stand out.
@@ -118,7 +121,7 @@ while true; do
   fi
 
   # scan every pane once → pstates (pid=CHAR) + aggregate flags for the badge
-  pstates=""; has_wait=0; has_work=0; has_claude=0; sess_ok=0
+  pstates=""; has_wait=0; has_work=0; has_claude=0; has_auth=0; sess_ok=0
   if tmux has-session -t "$session" 2>/dev/null; then
     sess_ok=1
     while read -r pid pcmd; do
@@ -126,7 +129,8 @@ while true; do
         [0-9]*.[0-9]*|claude)
           has_claude=1
           cap=$(tmux capture-pane -pt "$pid" 2>/dev/null)   # visible screen only (no stale scrollback)
-          if   printf '%s' "$cap" | grep -qiE "$WORK_MARK"; then pstates="$pstates $pid=W"; has_work=1
+          if   printf '%s' "$cap" | grep -qiE "$AUTH_MARK"; then pstates="$pstates $pid=A"; has_auth=1
+          elif printf '%s' "$cap" | grep -qiE "$WORK_MARK"; then pstates="$pstates $pid=W"; has_work=1
           elif printf '%s' "$cap" | grep -qE  "$WAIT_MARK"; then pstates="$pstates $pid=!"; has_wait=1
           else pstates="$pstates $pid=C"; fi
           ;;
@@ -138,6 +142,7 @@ while true; do
 
   if   [ "$sess_ok" = 0 ];    then state=nosession
   elif [ "$has_claude" = 0 ]; then state=offline
+  elif [ "$has_auth" = 1 ];   then state=authexpired
   elif [ "$has_wait" = 1 ];   then state=waiting
   elif [ "$has_work" = 1 ];   then state=working
   else state=idle
@@ -153,13 +158,14 @@ while true; do
     fi
   fi
 
-  ccount=$(printf '%s' "$pstates" | grep -oE '=[WC!]' | wc -l | tr -d ' ')
+  ccount=$(printf '%s' "$pstates" | grep -oE '=[WC!A]' | wc -l | tr -d ' ')
   cnote=""; [ "$ccount" -gt 1 ] && cnote=" ${bold}${ccount}×claude${reset}"
 
   case "$state" in
     working)   badge="${byl}${bold} ⚙ WORKING ${reset}";           sc="$yel" ;;
     waiting)   badge="${brd}${bold} ⌨ WAITING FOR INPUT ${reset}"; sc="$red" ;;
     idle)      badge="${bgr}${bold} ✓ IDLE ${reset}";              sc="$grn" ;;
+    authexpired) badge="${brd}${bold} ⚠ AUTH EXPIRED ${reset}";    sc="$red" ;;
     offline)   badge="${bgy}${bold} ○ NO CLAUDE ${reset}";         sc="$gry" ;;
     nosession) badge="${bgy}${bold} ○ NO SESSION ${reset}";        sc="$gry" ;;
   esac
