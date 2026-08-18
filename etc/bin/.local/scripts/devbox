@@ -166,9 +166,19 @@ cmd_up() {
 # it refreshes — which silently invalidates the box's copy (the recurring
 # "login expired on the box"). Re-copying at each `up`/`attach` means the box
 # always starts a session with a fresh, valid credential. Non-fatal.
+#
+# PREFERRED: install a static ~1-year token on the box with `devbox-claude-token`
+# (sets $CLAUDE_CODE_OAUTH_TOKEN via ~/.config/claude-token.env). Once that exists
+# the box no longer shares the rotating refresh token, so we SKIP this copy — a
+# rotating credential on the box is exactly what we're trying to eliminate.
 sync_claude_login() {
   local helper="$HOME/bin/.local/scripts/devbox-claude-login"
   [ -x "$helper" ] || return 0
+  # Static token already installed on the box? Then don't re-introduce a rotating one.
+  if ssh -o BatchMode=yes -o ConnectTimeout=5 "$NAME" 'test -f ~/.config/claude-token.env' 2>/dev/null; then
+    say "claude: box uses static token — skipping credential copy"
+    return 0
+  fi
   if DEVBOX_NAME="$NAME" "$helper" >/dev/null 2>&1; then
     say "claude login synced to box (fresh credential)"
   else

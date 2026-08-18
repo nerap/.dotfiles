@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# devbox-claude-token — install a long-lived Claude OAuth token on the devbox.
+#
+# WHY: the box and this Mac used to SHARE one OAuth credential
+# (~/.claude/.credentials.json). That credential uses a ROTATING refresh token:
+# whichever machine refreshes first invalidates the other's copy, so the box
+# (and sometimes the Mac) logged out every few hours — "Login expired · /login".
+#
+# FIX: `claude setup-token` mints a STATIC ~1-year token that never rotates. We
+# install it ONLY on the box as $CLAUDE_CODE_OAUTH_TOKEN, so the box stops
+# touching the shared refresh token entirely. The Mac keeps its own independent
+# /login. No shared credential → no rotation conflict → no more expiry loop.
+# (Confirmed: CLAUDE_CODE_OAUTH_TOKEN works with the interactive TUI, not just -p.)
+#
+# The token is a secret. It is read from a HIDDEN prompt and piped over SSH
+# stdin only — never in argv, never printed, never written to git, never sent
+# through SSM/CloudTrail.
+#
+# USAGE (run BOTH on your Mac):
+#   1) claude setup-token      # complete the browser flow, copy the printed token
+#   2) devbox-claude-token     # paste it at the hidden prompt
+set -uo pipefail
+
+[ -f "$HOME/.config/devbox.env" ] && . "$HOME/.config/devbox.env"
+NAME="${DEVBOX_NAME:-devbox}"
+
+printf 'Paste the token from `claude setup-token` (input hidden): ' >&2
+read -rs TOKEN; echo >&2
+[ -n "$TOKEN" ] || { echo "✗ empty token — aborting." >&2; exit 1; }
+case "$TOKEN" in
+  *[!![:print:]]*|*" "*) echo "✗ token has spaces/non-printable chars — aborting." >&2; exit 1 ;;
+esac
+
+# Remote installer is NOT secret (safe in argv); the TOKEN travels on stdin only.
+INSTALLER=$(cat <<'REMOTE' | base64
+set -euo pipefail
+read -r TOK
+[ -n "$TOK" ] || { echo "remote: empty token" >&2; exit 1; }
+mkdir -p ~/.config
+umask 077
+printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' "$TOK" > ~/.config/claude-token.env
+chmod 600 ~/.config/claude-token.env
+# hook the local (non-git) ~/.zshenv to source it, exactly once
+if ! grep -qF 'claude-token.env' ~/.zshenv 2>/dev/null; then
+  printf '\n# Claude long-lived OAuth token (local secret, never in git)\n[ -f ~/.config/claude-token.env ] && source ~/.config/claude-token.env\n' >> ~/.zshenv
+fi
+echo "remote: installed ~/.config/claude-token.env (600) + ~/.zshenv hook"
+REMOTE
+)
+
+printf '%s\n' "$TOKEN" | ssh "$NAME" "echo $INSTALLER | base64 -d | bash -s" || {
+  echo "✗ install failed — is 'ssh $NAME' working? (try: devbox up)" >&2; exit 1; }
+
+echo "✓ Token installed on '$NAME'."
+echo "  New claude sessions on the box now use the static ~1-year token."
+echo "  Existing panes keep their old login until restarted."
+echo "  The Mac's own login is untouched."
