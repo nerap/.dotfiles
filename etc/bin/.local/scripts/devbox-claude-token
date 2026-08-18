@@ -31,11 +31,16 @@ case "$TOKEN" in
   *[!![:print:]]*|*" "*) echo "✗ token has spaces/non-printable chars — aborting." >&2; exit 1 ;;
 esac
 
-# Remote installer is NOT secret (safe in argv); the TOKEN travels on stdin only.
-INSTALLER=$(cat <<'REMOTE' | base64
+# Build the remote script with the token embedded as its FIRST line (an
+# assignment), then feed the whole script to `bash -s` over SSH stdin. No `read`,
+# so there's no stdin collision between "the script" and "the token". The token
+# travels only inside this script over the encrypted SSH channel — never in argv
+# (no `ps` exposure), never in git, never through SSM/CloudTrail.
+{
+  printf 'TOK=%q\n' "$TOKEN"
+  cat <<'REMOTE'
 set -euo pipefail
-read -r TOK
-[ -n "$TOK" ] || { echo "remote: empty token" >&2; exit 1; }
+[ -n "${TOK:-}" ] || { echo "remote: empty token" >&2; exit 1; }
 mkdir -p ~/.config
 umask 077
 printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' "$TOK" > ~/.config/claude-token.env
@@ -46,9 +51,7 @@ if ! grep -qF 'claude-token.env' ~/.zshenv 2>/dev/null; then
 fi
 echo "remote: installed ~/.config/claude-token.env (600) + ~/.zshenv hook"
 REMOTE
-)
-
-printf '%s\n' "$TOKEN" | ssh "$NAME" "echo $INSTALLER | base64 -d | bash -s" || {
+} | ssh "$NAME" 'bash -s' || {
   echo "✗ install failed — is 'ssh $NAME' working? (try: devbox up)" >&2; exit 1; }
 
 echo "✓ Token installed on '$NAME'."
